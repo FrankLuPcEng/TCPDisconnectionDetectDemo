@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35913.81 d17.13
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TCPDisconnectionDetectDemo", "TCPDisconnectionDetectDemo\TCPDisconnectionDetectDemo.csproj", "{B39B687A-90CA-4656-8B4D-E204B10E795C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TestClient", "TestClient\TestClient.csproj", "{276735E9-BA5A-66C3-60CF-767B64B14C53}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B39B687A-90CA-4656-8B4D-E204B10E795C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B39B687A-90CA-4656-8B4D-E204B10E795C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B39B687A-90CA-4656-8B4D-E204B10E795C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B39B687A-90CA-4656-8B4D-E204B10E795C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{276735E9-BA5A-66C3-60CF-767B64B14C53}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{276735E9-BA5A-66C3-60CF-767B64B14C53}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{276735E9-BA5A-66C3-60CF-767B64B14C53}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{276735E9-BA5A-66C3-60CF-767B64B14C53}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {15BB0748-55AE-4394-8AFB-28CF07B9A74A}
+	EndGlobalSection
+EndGlobal
