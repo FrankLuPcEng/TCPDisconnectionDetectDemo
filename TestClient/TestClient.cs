@@ -1,5 +1,4 @@
 ﻿using Microsoft.Extensions.Logging;
-using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -7,16 +6,17 @@ using System.Text;
 public class TestClient : IDisposable
 {
     private readonly ILogger<TestClient> _logger;
-    private readonly string ip;
-    private readonly int port;
+    private readonly string _ip;
+    private readonly int _port;
 
-    private TcpClient? client;
-    private NetworkStream? stream;
-    private CancellationTokenSource cts = new();
-    private DateTime lastReceivedTime;
+    private TcpClient? _client;
+    private NetworkStream? _stream;
+    private readonly CancellationTokenSource _cts = new();
+    private readonly SemaphoreSlim _connectionLock = new(1, 1);
+    private TaskCompletionSource<bool>? _reconnectingTask;
+    private readonly object _reconnectLock = new();
 
-    public string Name { get; set; } = "TestClient-" + DateTime.Now.ToShortTimeString();
-
+    public string Name { get; set; }
     public bool EnableConnectionRetry { get; set; } = true;
     public bool EnableCheckConnection { get; set; } = true;
     public bool EnableTcpKeepAlive { get; set; } = true;
@@ -24,14 +24,12 @@ public class TestClient : IDisposable
     public int CheckConnectionInterval { get; set; } = 10000;
     public int TCPKeepAliveTime { get; set; } = 5000;
     public int TCPKeepAliveInterval { get; set; } = 1000;
-    public int IdleTimeout { get; set; } = 30000; // 閒置時間設定
 
     public TestClient(string ip, int port, ILogger<TestClient> logger)
     {
-        this.ip = ip;
-        this.port = port;
-        this._logger = logger;
-        this.lastReceivedTime = DateTime.Now;
+        _ip = ip;
+        _port = port;
+        _logger = logger;
     }
 
     public async Task StartAsync()
@@ -40,74 +38,22 @@ public class TestClient : IDisposable
 
         if (EnableCheckConnection)
         {
-            _ = Task.Run(() => CheckConnectionAsync(cts.Token));
+            _ = Task.Run(() => MonitorConnectionAsync(_cts.Token));
         }
 
-        await ReadFromServerAsync();
+        await ReceiveDataAsync(_cts.Token);
 
-        cts.Cancel();
-        client?.Close();
-        _logger.LogInformation("Client terminated.");
+        _cts.Cancel();
+        _client?.Close();
+        _logger.LogInformation("Client terminated. Name: {0}, Port: {1}", Name, _port);
     }
-
-    private void SetKeepAlive()
-    {
-        if (client?.Client != null)
-        {
-            var keepAlive = new byte[12];
-            BitConverter.GetBytes((uint)1).CopyTo(keepAlive, 0);
-            BitConverter.GetBytes((uint)TCPKeepAliveTime).CopyTo(keepAlive, 4);
-            BitConverter.GetBytes((uint)TCPKeepAliveInterval).CopyTo(keepAlive, 8);
-
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                _ = client.Client.IOControl(IOControlCode.KeepAliveValues, keepAlive, null);
-                _logger.LogDebug("TCP Keep-Alive 設定完成: {@KeepAliveSettings}", new
-                {
-                    Enable = EnableTcpKeepAlive,
-                    Time = TCPKeepAliveTime,
-                    Interval = TCPKeepAliveInterval
-                });
-            }
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux) || RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            {
-                client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-                client.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, TCPKeepAliveTime / 1000);
-                client.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, TCPKeepAliveInterval / 1000);
-            }
-            else
-            {
-                _logger.LogWarning("不支援的作業系統，無法設定 TCP Keep-Alive");
-                throw new PlatformNotSupportedException("不支援的作業系統，無法設定 TCP Keep-Alive");
-            }
-        }
-    }
-
-    private readonly SemaphoreSlim _connectionLock = new(1, 1);
-    private TaskCompletionSource<bool>? reconnectingTask;
-    private readonly object reconnectLock = new();
 
     private async Task EnsureConnectedAsync()
     {
-        TaskCompletionSource<bool>? myTcs;
-
-        lock (reconnectLock)
-        {
-            if (reconnectingTask != null)
-            {
-                myTcs = reconnectingTask;
-            }
-            else
-            {
-                reconnectingTask = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-                myTcs = reconnectingTask;
-            }
-        }
-
-        if (myTcs != reconnectingTask)
+        if (IsReconnecting())
         {
             _logger.LogInformation("等待其他任務完成重連...");
-            await myTcs.Task;
+            await _reconnectingTask!.Task;
             return;
         }
 
@@ -118,100 +64,106 @@ public class TestClient : IDisposable
 
             while (EnableConnectionRetry)
             {
-                try
+                if (await TryConnectAsync())
                 {
-                    client?.Close();
-                    client = new TcpClient();
-                    await client.ConnectAsync(ip, port);
-
-                    if (EnableTcpKeepAlive)
-                    {
-                        SetKeepAlive();
-                    }
-
-                    stream = client.GetStream();
-                    _logger.LogInformation("[{0}]成功連線至伺服器; {1}", Name, new { ((IPEndPoint)client.Client.LocalEndPoint)?.Port });
-
-                    reconnectingTask?.SetResult(true);
+                    _reconnectingTask?.SetResult(true);
                     break;
                 }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "[{0}]連線失敗，{RetryInterval} 毫秒後重試...", Name, new { IP = ip, Port = port, RetryInterval = ConnectionRetryInterval });
-                    await Task.Delay(ConnectionRetryInterval);
-                }
+
+                _logger.LogWarning("連線失敗，{RetryInterval} 毫秒後重試...", ConnectionRetryInterval);
+                await Task.Delay(ConnectionRetryInterval);
             }
-        }
-        catch (Exception ex)
-        {
-            reconnectingTask?.SetException(ex);
-            throw;
         }
         finally
         {
             _connectionLock.Release();
-            lock (reconnectLock)
-            {
-                reconnectingTask = null;
-            }
+            ResetReconnectingTask();
         }
     }
 
-    private async Task CheckConnectionAsync(CancellationToken token)
+    private async Task<bool> TryConnectAsync()
+    {
+        try
+        {
+            _client?.Close();
+            _client = new TcpClient();
+            await _client.ConnectAsync(_ip, _port);
+
+            if (EnableTcpKeepAlive)
+            {
+                ConfigureKeepAlive();
+            }
+
+            _stream = _client.GetStream();
+            _logger.LogInformation("成功連線至伺服器: {0}:{1}", _ip, _port);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "連線失敗");
+            return false;
+        }
+    }
+
+    private void ConfigureKeepAlive()
+    {
+        if (_client?.Client == null) return;
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var keepAlive = new byte[12];
+            BitConverter.GetBytes((uint)1).CopyTo(keepAlive, 0);
+            BitConverter.GetBytes((uint)TCPKeepAliveTime).CopyTo(keepAlive, 4);
+            BitConverter.GetBytes((uint)TCPKeepAliveInterval).CopyTo(keepAlive, 8);
+
+            _client.Client.IOControl(IOControlCode.KeepAliveValues, keepAlive, null);
+        }
+        else
+        {
+            _client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+        }
+
+        _logger.LogDebug("TCP Keep-Alive 設定完成: Time={0}, Interval={1}", TCPKeepAliveTime, TCPKeepAliveInterval);
+    }
+
+    private async Task MonitorConnectionAsync(CancellationToken token)
     {
         while (!token.IsCancellationRequested)
         {
-            bool isHealthy = false;
-
-            try
+            if (!IsConnectionHealthy())
             {
-
-                var socket = client?.Client;
-                if (socket != null)
-                {
-                    var isDisconnected = !socket.Connected;
-                    var isUnreadable = socket.Poll(CheckConnectionInterval * 1000, SelectMode.SelectRead) && client.Available == 0;
-                    var isError = socket.Poll(CheckConnectionInterval * 1000, SelectMode.SelectError);
-
-                    if (isDisconnected || isUnreadable || isError)
-                    {
-                        _logger.LogWarning("連線檢查異常：{@CheckResult}", new
-                        {
-                            Disconnected = isDisconnected,
-                            Unreadable = isUnreadable,
-                            Error = isError
-                        });
-                        await EnsureConnectedAsync();
-                    }
-                    else
-                    {
-                        isHealthy = true;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "連線檢查時發生例外");
-            }
-
-            if (isHealthy)
-            {
-                _logger.LogDebug("連線檢查正常");
+                _logger.LogWarning("連線檢查異常，嘗試重新連線...");
+                await EnsureConnectedAsync();
             }
 
             await Task.Delay(CheckConnectionInterval, token);
         }
     }
 
-    private async Task ReadFromServerAsync()
+    private bool IsConnectionHealthy()
     {
-        byte[] buffer = new byte[20];
+        try
+        {
+            var socket = _client?.Client;
+            if (socket == null || !socket.Connected) return false;
 
-        while (true)
+            return !(socket.Poll(0, SelectMode.SelectRead) && _client.Available == 0);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task ReceiveDataAsync(CancellationToken token)
+    {
+        byte[] buffer = new byte[1024];
+
+        while (!token.IsCancellationRequested)
         {
             try
             {
-                int bytesRead = await stream!.ReadAsync(buffer);
+                int bytesRead = await _stream!.ReadAsync(buffer, token);
                 if (bytesRead == 0)
                 {
                     _logger.LogWarning("伺服器中斷連線，嘗試重新連線...");
@@ -219,26 +171,50 @@ public class TestClient : IDisposable
                     continue;
                 }
 
-                lastReceivedTime = DateTime.Now; // 更新最後接收時間
                 string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                _logger.LogInformation("接收到伺服器資料：{ServerResponse}", response);
+                _logger.LogInformation("接收到伺服器資料：{0}", response);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("接收資料操作已取消");
+                break;
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "接收資料發生錯誤，嘗試重新連線...");
                 await EnsureConnectedAsync();
             }
+        }
+    }
 
-            await Task.Delay(1000);
+    private bool IsReconnecting()
+    {
+        lock (_reconnectLock)
+        {
+            if (_reconnectingTask == null)
+            {
+                _reconnectingTask = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                return false;
+            }
+
+            return true;
+        }
+    }
+
+    private void ResetReconnectingTask()
+    {
+        lock (_reconnectLock)
+        {
+            _reconnectingTask = null;
         }
     }
 
     public void Dispose()
     {
-        cts.Cancel();
-        client?.Close();
-        stream?.Dispose();
-        cts.Dispose();
+        _cts.Cancel();
+        _client?.Close();
+        _stream?.Dispose();
+        _cts.Dispose();
         _logger.LogInformation("已釋放資源");
         GC.SuppressFinalize(this);
     }
